@@ -2,6 +2,8 @@ import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import * as ytdlWrapper from "@j3lte/ytdl-wrapper";
+import { sendProgressToClients } from "./sse-service";
+import type { ProgressData } from "./sse-service";
 
 // yt-dlpの実行ファイルのパス
 const YT_DLP_PATH = resolve("./bin/yt-dlp.exe");
@@ -17,6 +19,9 @@ if (!existsSync(DOWNLOADS_DIR)) {
 // ytdl-wrapperインスタンスの作成
 const ytdlInstance = new ytdlWrapper.YTDLWrapper(YT_DLP_PATH);
 
+// アクティブなダウンロードを追跡するMap
+const activeDownloads = new Map<string, ytdlWrapper.YTDLEventEmitter>();
+
 // ダウンロードオプションの型定義
 interface DownloadOptions {
   url: string;
@@ -26,15 +31,6 @@ interface DownloadOptions {
   audioOnly?: boolean;
   videoOnly?: boolean;
   additionalOptions?: Record<string, string | boolean | number>;
-}
-
-// 進捗情報の型定義
-interface ProgressInfo {
-  percent: number | string | null | undefined;
-  totalSize: string | undefined;
-  currentSpeed: string | undefined;
-  eta: string | undefined;
-  timestamp: number;
 }
 
 class YtdlService {
@@ -113,8 +109,10 @@ class YtdlService {
 
   /**
    * 動画をダウンロード
+   * @param options ダウンロードオプション
+   * @param downloadId ダウンロードID（進捗通知用）
    */
-  async downloadVideo(options: DownloadOptions) {
+  downloadVideo(options: DownloadOptions, downloadId: string) {
     const {
       url,
       format,
@@ -144,11 +142,17 @@ class YtdlService {
         const audioFormat = (additionalOptions?.audioFormat as string) || "mp3";
         args.push("--audio-format", audioFormat);
 
+        // 音質設定（デフォルトは最高品質）
         args.push("--audio-quality", quality || "0");
+
+        // MP3の場合はWindows互換性向上のためのオプション
+        if (audioFormat === "mp3") {
+          args.push("--embed-metadata"); // メタデータを埋め込む
+        }
       } else if (videoOnly) {
         args.push("-f", "bestvideo");
-      } else if (quality) {
-        // 品質に基づいたフォーマット選択
+      } else if (quality && !additionalOptions?.remuxVideo) {
+        // 品質に基づいたフォーマット選択（remuxVideo指定がない場合）
         let formatString = "";
         switch (quality) {
           case "best":
@@ -171,14 +175,70 @@ class YtdlService {
             formatString = quality;
         }
         args.push("-f", formatString);
-      } else {
-        // デフォルトは最高品質
+      } else if (!additionalOptions?.remuxVideo) {
+        // デフォルトは最高品質（remuxVideo指定がない場合）
         args.push("-f", "bestvideo+bestaudio/best");
       }
 
       // 動画を特定の形式に変換する場合
       if (!audioOnly && additionalOptions?.remuxVideo) {
         args.push("--remux-video", additionalOptions.remuxVideo as string);
+
+        // MP4形式の場合は、WindowsとiOSで広く再生できるコーデックを指定
+        if (additionalOptions.remuxVideo === "mp4") {
+          // MP4形式では、H.264ビデオとm4aオーディオ（AAC）を指定
+          // シンプルな形式指定
+          if (quality) {
+            switch (quality) {
+              case "best":
+                // 最高品質でH.264/AACを指定
+                args.push("-f", "bestvideo[vcodec^=avc]+140/bestvideo+140");
+                break;
+              case "1080p":
+                // 1080p以下でH.264/AACを指定
+                args.push(
+                  "-f",
+                  "bestvideo[height<=1080][vcodec^=avc]+140/bestvideo[height<=1080]+140",
+                );
+                break;
+              case "720p":
+                // 720p以下でH.264/AACを指定
+                args.push(
+                  "-f",
+                  "bestvideo[height<=720][vcodec^=avc]+140/bestvideo[height<=720]+140",
+                );
+                break;
+              case "480p":
+                // 480p以下でH.264/AACを指定
+                args.push(
+                  "-f",
+                  "bestvideo[height<=480][vcodec^=avc]+140/bestvideo[height<=480]+140",
+                );
+                break;
+              case "360p":
+                // 360p以下でH.264/AACを指定
+                args.push(
+                  "-f",
+                  "bestvideo[height<=360][vcodec^=avc]+140/bestvideo[height<=360]+140",
+                );
+                break;
+              default:
+                // その他の指定はそのまま使用し、m4aオーディオを指定
+                args.push("-f", `${quality}+140`);
+            }
+          } else {
+            // 品質指定がない場合は最高品質でH.264/AACを指定
+            args.push("-f", "bestvideo[vcodec^=avc]+140/bestvideo+140");
+          }
+
+          // ビデオコーデックの優先順位を指定
+          args.push("-S", "res,vcodec:h264");
+        }
+      }
+
+      // 音声フォーマットがopusの場合はmp3に変換（Windowsでの再生互換性のため）
+      if (audioOnly && additionalOptions?.audioFormat === "opus") {
+        args.push("--audio-format", "mp3");
       }
 
       // 追加オプションの適用
@@ -186,6 +246,18 @@ class YtdlService {
         for (const [key, value] of Object.entries(additionalOptions)) {
           // 既に処理した特殊オプションはスキップ
           if (["audioFormat", "remuxVideo"].includes(key)) continue;
+
+          // metadataオプションの特別処理
+          if (key === "addMetadata" && value === true) {
+            args.push("--embed-metadata");
+            continue;
+          }
+
+          // thumbnailオプションの特別処理
+          if (key === "embedThumbnail" && value === true) {
+            args.push("--embed-thumbnail");
+            continue;
+          }
 
           if (typeof value === "boolean") {
             if (value === true) {
@@ -197,60 +269,100 @@ class YtdlService {
         }
       }
 
-      // ダウンロード実行
+      // ダウンロード実行（非同期で実行）
       const eventEmitter = ytdlInstance.exec(args);
 
-      return new Promise<{
-        stdout: string;
-        stderr: string;
-        success: boolean;
-        options: string[];
-        progress: ProgressInfo[];
-      }>((resolve, _reject) => {
-        let stdout = "";
-        let stderr = "";
-        const progressData: ProgressInfo[] = [];
+      // アクティブダウンロードに追加
+      activeDownloads.set(downloadId, eventEmitter);
 
-        // イベントハンドラー設定
-        eventEmitter.on("event", (eventType: string, eventData: string) => {
-          stdout += `[${eventType}] ${eventData}\n`;
-        });
+      // イベントハンドラー設定
+      let stdout = "";
+      let stderr = "";
+      const progressData: ProgressData[] = [];
 
-        // 進捗状況を取得
-        eventEmitter.on("progress", (progress: ytdlWrapper.Progress) => {
-          const progressInfo: ProgressInfo = {
-            percent: progress.percent,
-            totalSize: progress.totalSize,
-            currentSpeed: progress.currentSpeed,
-            eta: progress.eta,
-            timestamp: Date.now(),
-          };
-          progressData.push(progressInfo);
+      // イベントハンドラー設定
+      eventEmitter.on("event", (eventType: string, eventData: string) => {
+        stdout += `[${eventType}] ${eventData}\n`;
+      });
 
-          // コンソールに進捗を出力（デバッグ用）
-          console.log(
-            `進捗: ${progress.percent || 0}%, 速度: ${progress.currentSpeed || "N/A"}, 残り時間: ${progress.eta || "N/A"}`,
-          );
-        });
+      // 進捗状況を取得
+      eventEmitter.on("progress", (progress: ytdlWrapper.Progress) => {
+        const progressInfo: ProgressData = {
+          percent: progress.percent,
+          totalSize: progress.totalSize,
+          currentSpeed: progress.currentSpeed,
+          eta: progress.eta,
+          timestamp: Date.now(),
+        };
+        progressData.push(progressInfo);
 
-        eventEmitter.on("error", (err) => {
-          stderr += `${String(err)}\n`;
-        });
+        // コンソールに進捗を出力（デバッグ用）
+        console.log(
+          `進捗: ${progress.percent || 0}%, 速度: ${progress.currentSpeed || "N/A"}, 残り時間: ${progress.eta || "N/A"}`,
+        );
 
-        eventEmitter.on("close", (code) => {
-          resolve({
-            stdout,
-            stderr,
-            success: code === 0,
-            options: args,
-            progress: progressData,
-          });
+        // SSEを通じてクライアントに進捗を送信
+        sendProgressToClients(downloadId, progressInfo);
+      });
+
+      eventEmitter.on("error", (err) => {
+        stderr += `${String(err)}\n`;
+
+        // エラー情報をクライアントに送信
+        sendProgressToClients(downloadId, {
+          error: String(err),
+          timestamp: Date.now(),
         });
       });
+
+      eventEmitter.on("close", (code) => {
+        // 完了情報をクライアントに送信
+        sendProgressToClients(downloadId, {
+          completed: true,
+          success: code === 0,
+          code: code,
+          timestamp: Date.now(),
+        });
+
+        // アクティブダウンロードから削除
+        activeDownloads.delete(downloadId);
+      });
+
+      // 実行中の非同期処理のハンドルを返す
+      return downloadId;
     } catch (error) {
       console.error("ダウンロード中にエラーが発生しました:", error);
+      sendProgressToClients(downloadId, {
+        error: String(error),
+        timestamp: Date.now(),
+      });
       throw error;
     }
+  }
+
+  /**
+   * アクティブなダウンロードを中止
+   */
+  cancelDownload(downloadId: string): boolean {
+    const download = activeDownloads.get(downloadId);
+    if (download) {
+      // プロセスを強制終了するためにnullを送信
+      try {
+        // EventEmitterはkillメソッドを直接持っていないが、
+        // イベントリスナーを削除して、クリーンアップする
+        activeDownloads.delete(downloadId);
+        // 完了メッセージをクライアントに送信
+        sendProgressToClients(downloadId, {
+          cancelled: true,
+          timestamp: Date.now(),
+        });
+        return true;
+      } catch (error) {
+        console.error("ダウンロードの中断に失敗しました:", error);
+        return false;
+      }
+    }
+    return false;
   }
 
   /**

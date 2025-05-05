@@ -1,7 +1,13 @@
-import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
-import { ytdl } from "../services/ytdl-service";
+import { Hono } from "hono";
 import { z } from "zod";
+import {
+  addSSEClient,
+  generateDownloadId,
+  removeSSEClient,
+} from "../services/sse-service";
+import type { SSEClient } from "../services/sse-service";
+import { ytdl } from "../services/ytdl-service";
 
 const ytRoutes = new Hono();
 
@@ -34,7 +40,7 @@ const downloadOptionsSchema = z.object({
   audioOnly: z.boolean().optional(),
   videoOnly: z.boolean().optional(),
   additionalOptions: z
-    .record(z.string(), z.union([z.string(), z.boolean(), z.number()]))
+    .record(z.union([z.string(), z.boolean(), z.number()]))
     .optional(),
 });
 
@@ -46,8 +52,18 @@ ytRoutes.post(
     const options = c.req.valid("json");
 
     try {
-      const result = await ytdl.downloadVideo(options);
-      return c.json({ success: true, data: result });
+      // ダウンロードIDを生成
+      const downloadId = generateDownloadId();
+
+      // ダウンロードを開始（非同期で実行し、ダウンロードIDを返す）
+      ytdl.downloadVideo(options, downloadId);
+
+      return c.json({
+        success: true,
+        data: {
+          downloadId: downloadId,
+        },
+      });
     } catch (error) {
       console.error("ダウンロードに失敗しました:", error);
       return c.json(
@@ -57,6 +73,55 @@ ytRoutes.post(
     }
   },
 );
+
+// ダウンロード進捗をストリーミングするSSEエンドポイント
+ytRoutes.get("/download/:id/progress", async (c) => {
+  const downloadId = c.req.param("id");
+
+  // SSEストリームを設定（Responseを直接返す）
+  const { readable, writable } = new TransformStream();
+  const writer = writable.getWriter();
+
+  const textEncoder = new TextEncoder();
+
+  // ストリームラッパーの作成（SSEClient型に準拠）
+  const stream: SSEClient = {
+    send: (event: { event: string; data: string }) => {
+      const formattedData = `event: ${event.event}\ndata: ${event.data}\n\n`;
+      writer.write(textEncoder.encode(formattedData));
+    },
+  };
+
+  // ストリームヘッダー設定
+  stream.send({ event: "connected", data: "Connected to progress stream" });
+
+  // クライアントをダウンロードIDに関連付ける
+  addSSEClient(downloadId, stream);
+
+  // クライアント接続が閉じたときの処理
+  c.req.raw.signal.addEventListener("abort", () => {
+    removeSSEClient(downloadId, stream);
+    writer.close().catch(console.error);
+  });
+
+  // 接続維持のためのping
+  const pingInterval = setInterval(() => {
+    stream.send({ event: "ping", data: "ping" });
+  }, 30000);
+
+  // クリーンアップ
+  c.req.raw.signal.addEventListener("abort", () => {
+    clearInterval(pingInterval);
+  });
+
+  return new Response(readable, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
+});
 
 // 利用可能なフォーマットを取得するエンドポイント
 ytRoutes.post("/formats", zValidator("json", videoInfoSchema), async (c) => {

@@ -82,7 +82,7 @@
             <form id="url-form" class="mb-4">
               <div class="input-group mb-3">
                 <input type="url" id="video-url" class="form-control" placeholder="YouTube URL を入力" required>
-                <button type="submit" class="btn btn-primary">情報取得</button>
+                <button type="submit" id="fetch-info-btn" class="btn btn-primary">情報取得</button>
               </div>
             </form>
 
@@ -137,10 +137,7 @@
                     <label for="quality" class="form-label">品質</label>
                     <select id="quality" class="form-select">
                       <option value="best">最高品質</option>
-                      <option value="1080p">1080p</option>
-                      <option value="720p">720p</option>
-                      <option value="480p">480p</option>
-                      <option value="360p">360p</option>
+                      <!-- 解像度オプションはJSで動的に追加 -->
                     </select>
                   </div>
 
@@ -160,7 +157,7 @@
                   <div class="mb-3">
                     <label for="output-format" class="form-label">出力形式</label>
                     <select id="output-format" class="form-select">
-                      <!-- 選択肢はJSで動的に追加されます -->
+                      <!-- 選択肢はJSで動的に追加 -->
                     </select>
                     <small class="text-muted">指定された形式に変換します（可能な場合）</small>
                   </div>
@@ -278,10 +275,55 @@
       const progressSpeed = document.getElementById('progress-speed');
       const progressEta = document.getElementById('progress-eta');
 
-      // 現在の動画情報
       let currentVideoInfo = null;
-      // 進捗更新のために使用するポーリングID
       let progressIntervalId = null;
+      let isDownloading = false;
+      // 解像度情報を保存する変数
+      let availableResolutions = [];
+
+      // 利用可能な解像度を抽出する関数
+      function extractAvailableResolutions(formatData) {
+        const resolutions = new Set();
+
+        // formatDataから解像度を抽出
+        const formatLines = formatData.split('\n')
+          .filter(line => line.trim().match(/^\d+\s+/)); // ID から始まる行を抽出
+
+        for (const line of formatLines) {
+          // 解像度を抽出（例: 1920x1080、640x360など）
+          const resMatch = line.match(/\s+(\d+x\d+)\s+/);
+          if (resMatch && resMatch[1]) {
+            const resolution = resMatch[1];
+            const height = parseInt(resolution.split('x')[1]);
+
+            // 有効な解像度の場合だけ追加（audio onlyの行を除外）
+            if (height > 0) {
+              resolutions.add(height);
+            }
+          }
+        }
+
+        // Setから配列に変換して降順にソート
+        return Array.from(resolutions).sort((a, b) => b - a);
+      }
+
+      // 解像度選択オプションを更新する関数
+      function updateResolutionOptions(resolutions) {
+        const qualitySelect = document.getElementById('quality');
+
+        // 最高品質オプションを保持
+        const bestOption = qualitySelect.querySelector('option[value="best"]');
+        qualitySelect.innerHTML = '';
+        qualitySelect.appendChild(bestOption);
+
+        // 解像度オプションを追加
+        for (const height of resolutions) {
+          const option = document.createElement('option');
+          option.value = height + 'p';
+          option.textContent = height + 'p';
+          qualitySelect.appendChild(option);
+        }
+      }
 
       // yt-dlpの状態を確認
       async function checkYtDlpStatus() {
@@ -336,7 +378,7 @@
               new Date(b.modified).getTime() - new Date(a.modified).getTime()
             );
 
-            sortedFiles.forEach(file => {
+            for (const file of sortedFiles) {
               const fileSize = formatFileSize(file.size);
               const modifiedDate = new Date(file.modified).toLocaleString('ja-JP');
 
@@ -350,7 +392,7 @@
               `;
 
               downloadsContainer.appendChild(item);
-            });
+            }
           } else {
             downloadsContainer.innerHTML = '<div class="p-3 text-center text-danger">ダウンロード一覧の取得に失敗しました</div>';
           }
@@ -499,6 +541,12 @@
                 formatSelect.appendChild(option);
               }
             }
+
+            // 利用可能な解像度を抽出して保存
+            availableResolutions = extractAvailableResolutions(data.data);
+
+            // 解像度選択オプションを更新
+            updateResolutionOptions(availableResolutions);
           } else {
             formatsContainer.innerHTML = '<div class="text-danger">フォーマット一覧の取得に失敗しました</div>';
           }
@@ -508,13 +556,156 @@
         }
       }
 
+      // 進捗状況の更新を開始
+      function startProgressPolling(downloadId) {
+        // ダウンロード中フラグを設定
+        isDownloading = true;
+        // 情報取得ボタンを無効化
+        document.getElementById('fetch-info-btn').disabled = true;
+        // ダウンロードボタンを無効化（冗長だが念のため）
+        document.getElementById('download-button').disabled = true;
+
+        // 進捗状況表示を初期化・表示
+        progressContainer.style.display = 'block';
+        progressBar.style.width = '0%';
+        progressPercent.textContent = '0%';
+        progressSpeed.textContent = '速度: N/A';
+        progressEta.textContent = '残り時間: N/A';
+
+        // 過去の進捗更新タイマーがあれば停止
+        if (progressIntervalId) {
+          clearInterval(progressIntervalId);
+          progressIntervalId = null;
+        }
+
+        // SSE接続を設定
+        let eventSource = new EventSource(`/api/download/${downloadId}/progress`);
+
+        // 進捗イベントを処理
+        eventSource.addEventListener('progress', function (e) {
+          try {
+            const progressData = JSON.parse(e.data);
+            updateProgressDisplay(progressData);
+
+            // ダウンロードが完了した場合
+            if (progressData.completed) {
+              // 進捗表示を100%に設定
+              progressBar.style.width = '100%';
+              progressPercent.textContent = '100%';
+              progressSpeed.textContent = '速度: 完了';
+              progressEta.textContent = '残り時間: 0秒';
+
+              // 成功メッセージを表示
+              const status = progressData.success ? '成功' : '失敗';
+              console.log(`ダウンロード${status}。`);
+
+              // イベントソースを閉じる
+              stopProgressPolling(eventSource);
+
+              // 少し待ってから成功メッセージを表示
+              setTimeout(() => {
+                if (progressData.success) {
+                  alert('ダウンロードが完了しました！');
+                  getDownloadedFiles(); // ダウンロード一覧を更新
+                } else {
+                  alert('ダウンロードは完了しましたが、エラーが発生した可能性があります。');
+                }
+
+                // 進捗表示を非表示にする
+                setTimeout(() => {
+                  progressContainer.style.display = 'none';
+                }, 1000);
+              }, 500);
+            }
+
+            // エラーの場合
+            if (progressData.error) {
+              console.error(`ダウンロード中にエラーが発生しました: ${progressData.error}`);
+              alert(`ダウンロード中にエラーが発生しました: ${progressData.error}`);
+              stopProgressPolling(eventSource);
+              progressContainer.style.display = 'none';
+            }
+          } catch (error) {
+            console.error('進捗データの解析エラー:', error, e.data);
+          }
+        });
+
+        // エラー処理
+        eventSource.onerror = function (e) {
+          console.error('SSE接続エラー:', e);
+          eventSource.close();
+          eventSource = null;
+          showError('進捗情報の取得に失敗しました');
+        };
+
+        // 接続処理
+        eventSource.addEventListener('connected', function (e) {
+          console.log('進捗ストリームに接続しました:', e.data);
+        });
+
+        // 以前のポーリング処理は削除
+        return eventSource;
+      }
+
+      // 進捗状況の更新を停止
+      function stopProgressPolling(eventSource) {
+        if (eventSource) {
+          eventSource.close();
+        }
+
+        // ダウンロード中フラグを解除
+        isDownloading = false;
+        // 情報取得ボタンを有効化
+        document.getElementById('fetch-info-btn').disabled = false;
+        // ダウンロードボタンを有効化
+        document.getElementById('download-button').disabled = false;
+      }
+
+      // 進捗表示を更新
+      function updateProgressDisplay(progressData) {
+        if (!progressData) return;
+
+        // パーセント値を取得
+        if (progressData.percent !== undefined) {
+          const percentValue = typeof progressData.percent === 'number'
+            ? progressData.percent
+            : parseFloat(progressData.percent || '0');
+
+          // 進捗バーを更新
+          progressBar.style.width = `${percentValue}%`;
+          progressPercent.textContent = `${percentValue.toFixed(1)}%`;
+        }
+
+        // 速度を更新
+        if (progressData.currentSpeed !== undefined) {
+          progressSpeed.textContent = `速度: ${progressData.currentSpeed || 'N/A'}`;
+        }
+
+        // 残り時間を更新
+        if (progressData.eta !== undefined) {
+          progressEta.textContent = `残り時間: ${progressData.eta || 'N/A'}`;
+        }
+      }
+
       // URLフォーム送信時
       urlForm.addEventListener('submit', async (e) => {
         e.preventDefault();
         hideError();
 
+        // ダウンロード中は処理しない
+        if (isDownloading) {
+          alert('ダウンロード中は新しい情報を取得できません。ダウンロードが完了するまでお待ちください。');
+          return;
+        }
+
         const url = videoUrlInput.value.trim();
         if (!url) return;
+
+        // ボタンをローディング状態に
+        const fetchInfoBtn = document.getElementById('fetch-info-btn');
+        const originalBtnText = fetchInfoBtn.innerHTML;
+        fetchInfoBtn.disabled = true;
+        fetchInfoBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> 読み込み中...';
 
         try {
           // UIをリセット
@@ -554,12 +745,23 @@
             // UIを表示
             videoInfo.classList.remove('d-none');
             downloadOptions.classList.remove('d-none');
+
+            // フォーマット情報を取得し利用可能な解像度を更新
+            getFormats(url).then(() => {
+              console.log(`${availableResolutions.length}個の解像度オプションを読み込みました`);
+            }).catch(err => {
+              console.error('解像度情報の取得に失敗:', err);
+            });
           } else {
             showError('動画情報の取得に失敗しました。URLが正しいか確認してください。');
           }
         } catch (error) {
           console.error('動画情報の取得に失敗:', error);
           showError('APIエラー: 動画情報を取得できませんでした');
+        } finally {
+          // ボタンを元に戻す
+          fetchInfoBtn.disabled = false;
+          fetchInfoBtn.innerHTML = originalBtnText;
         }
       });
 
@@ -571,50 +773,15 @@
         }
       });
 
-      // 進捗状況の更新を開始
-      function startProgressPolling(taskId) {
-        // 進捗状況表示を初期化・表示
-        progressContainer.style.display = 'block';
-        progressBar.style.width = '0%';
-        progressPercent.textContent = '0%';
-        progressSpeed.textContent = '速度: N/A';
-        progressEta.textContent = '残り時間: N/A';
-
-        // 過去の進捗更新タイマーがあれば停止
-        if (progressIntervalId) {
-          clearInterval(progressIntervalId);
-        }
-      }
-
-      // 進捗状況の更新を停止
-      function stopProgressPolling() {
-        if (progressIntervalId) {
-          clearInterval(progressIntervalId);
-          progressIntervalId = null;
-        }
-      }
-
-      // 進捗表示を更新
-      function updateProgressDisplay(progressData) {
-        if (!progressData || progressData.length === 0) return;
-
-        // 最新の進捗情報を取得
-        const latestProgress = progressData[progressData.length - 1];
-
-        // 進捗バーを更新
-        const percentValue = typeof latestProgress.percent === 'number'
-          ? latestProgress.percent
-          : parseFloat(latestProgress.percent || '0');
-
-        progressBar.style.width = `${percentValue}%`;
-        progressPercent.textContent = `${percentValue.toFixed(1)}%`;
-        progressSpeed.textContent = `速度: ${latestProgress.currentSpeed || 'N/A'}`;
-        progressEta.textContent = `残り時間: ${latestProgress.eta || 'N/A'}`;
-      }
-
       // ダウンロードフォーム送信時
       downloadForm.addEventListener('submit', async (e) => {
         e.preventDefault();
+
+        // ダウンロード中は処理しない
+        if (isDownloading) {
+          alert('他のダウンロードが進行中です。完了するまでお待ちください。');
+          return;
+        }
 
         if (!currentVideoInfo) {
           showError('動画情報が取得されていません。URLを入力して情報を取得してください。');
@@ -673,9 +840,6 @@
           downloadBtn.disabled = true;
           downloadBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> ダウンロード中...';
 
-          // 進捗表示を初期化
-          startProgressPolling();
-
           const response = await fetch('/api/download', {
             method: 'POST',
             headers: {
@@ -686,23 +850,12 @@
 
           const data = await response.json();
 
-          // ダウンロードボタンを元に戻す
-          downloadBtn.disabled = false;
-          downloadBtn.textContent = 'ダウンロード';
-
           if (data.success) {
-            // 進捗情報があれば表示
-            if (data.data.progress && data.data.progress.length > 0) {
-              updateProgressDisplay(data.data.progress);
-            }
+            // ダウンロードIDを取得
+            const downloadId = data.data.downloadId;
 
-            // 少し待ってから進捗表示を非表示に
-            setTimeout(() => {
-              progressContainer.style.display = 'none';
-            }, 3000);
-
-            alert('ダウンロードが完了しました。');
-            getDownloadedFiles(); // ダウンロード一覧を更新
+            // 進捗表示を初期化
+            const eventSource = startProgressPolling(downloadId);
           } else {
             // 進捗表示を非表示に
             progressContainer.style.display = 'none';
@@ -714,13 +867,11 @@
 
           // 進捗表示を非表示に
           progressContainer.style.display = 'none';
-
+        } finally {
+          // ダウンロードボタンを元に戻す
           const downloadBtn = document.getElementById('download-button');
           downloadBtn.disabled = false;
           downloadBtn.textContent = 'ダウンロード';
-        } finally {
-          // 進捗状況の更新を停止
-          stopProgressPolling();
         }
       });
 
