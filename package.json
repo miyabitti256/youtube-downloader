@@ -1,0 +1,23 @@
+{
+  "name": "youtube-downloader",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun src/index.ts",
+    "dev": "bun --watch src/index.ts"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "1.9.4",
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@hono/zod-validator": "^0.5.0",
+    "@j3lte/ytdl-wrapper": "npm:@jsr/j3lte__ytdl-wrapper",
+    "hono": "^4.7.8",
+    "zod": "^3.24.4"
+  }
+}
