@@ -150,7 +150,26 @@ class YtdlService {
           args.push("--embed-metadata"); // メタデータを埋め込む
         }
       } else if (videoOnly) {
-        args.push("-f", "bestvideo");
+        // ビデオのみのフォーマットを選択（音声なし）
+        // H.264コーデックを優先し、解像度を基準に選択
+        if (quality?.match(/^\d+p$/)) {
+          // 数字p形式の解像度指定（例：1080p, 720p, 480p, 360p）
+          const height = quality.replace("p", "");
+          args.push(
+            "-f",
+            `bestvideo[height<=${height}][vcodec^=avc]/bestvideo[height<=${height}]/bestvideo`,
+          );
+        } else if (quality === "best") {
+          args.push("-f", "bestvideo[vcodec^=avc]/bestvideo");
+        } else if (quality) {
+          // その他の指定の場合はそのまま使用
+          args.push("-f", quality);
+        } else {
+          // 品質指定がない場合はH.264コーデックを優先
+          args.push("-f", "bestvideo[vcodec^=avc]/bestvideo");
+        }
+        // ビデオコーデック優先度とビットレート基準の並び替え
+        args.push("-S", "res,vcodec:h264,br");
       } else if (quality && !additionalOptions?.remuxVideo) {
         // 品質に基づいたフォーマット選択（remuxVideo指定がない場合）
         let formatString = "";
@@ -187,52 +206,51 @@ class YtdlService {
         // MP4形式の場合は、WindowsとiOSで広く再生できるコーデックを指定
         if (additionalOptions.remuxVideo === "mp4") {
           // MP4形式では、H.264ビデオとm4aオーディオ（AAC）を指定
-          // シンプルな形式指定
-          if (quality) {
-            switch (quality) {
-              case "best":
-                // 最高品質でH.264/AACを指定
-                args.push("-f", "bestvideo[vcodec^=avc]+140/bestvideo+140");
-                break;
-              case "1080p":
-                // 1080p以下でH.264/AACを指定
-                args.push(
-                  "-f",
-                  "bestvideo[height<=1080][vcodec^=avc]+140/bestvideo[height<=1080]+140",
-                );
-                break;
-              case "720p":
-                // 720p以下でH.264/AACを指定
-                args.push(
-                  "-f",
-                  "bestvideo[height<=720][vcodec^=avc]+140/bestvideo[height<=720]+140",
-                );
-                break;
-              case "480p":
-                // 480p以下でH.264/AACを指定
-                args.push(
-                  "-f",
-                  "bestvideo[height<=480][vcodec^=avc]+140/bestvideo[height<=480]+140",
-                );
-                break;
-              case "360p":
-                // 360p以下でH.264/AACを指定
-                args.push(
-                  "-f",
-                  "bestvideo[height<=360][vcodec^=avc]+140/bestvideo[height<=360]+140",
-                );
-                break;
-              default:
-                // その他の指定はそのまま使用し、m4aオーディオを指定
-                args.push("-f", `${quality}+140`);
+          // AACオーディオフォーマットを指定（一般的にm4aのフォーマット）
+          const aacAudio = "bestaudio[ext=m4a]";
+
+          if (videoOnly) {
+            // ビデオのみモードの場合はオーディオを含めない
+            if (quality?.match(/^\d+p$/)) {
+              const height = quality.replace("p", "");
+              args.push(
+                "-f",
+                `bestvideo[height<=${height}][vcodec^=avc]/bestvideo[height<=${height}]/bestvideo`,
+              );
+            } else {
+              args.push("-f", "bestvideo[vcodec^=avc]/bestvideo");
+            }
+            // ビデオコーデック優先度とビットレート基準の並び替え
+            args.push("-S", "res,vcodec:h264,br");
+          } else if (quality) {
+            // 通常の動画+音声モード
+            if (quality === "best") {
+              // 最高品質でH.264/AACを指定
+              args.push(
+                "-f",
+                `bestvideo[vcodec^=avc]+${aacAudio}/bestvideo+${aacAudio}`,
+              );
+            } else if (quality.match(/^\d+p$/)) {
+              // 数字p形式の解像度指定（例：1080p, 720p, 480p, 360p）
+              const height = quality.replace("p", "");
+              args.push(
+                "-f",
+                `bestvideo[height<=${height}][vcodec^=avc]+${aacAudio}/bestvideo[height<=${height}]+${aacAudio}`,
+              );
+            } else {
+              // その他の指定はそのまま使用し、m4aオーディオを指定
+              args.push("-f", `${quality}+${aacAudio}`);
             }
           } else {
             // 品質指定がない場合は最高品質でH.264/AACを指定
-            args.push("-f", "bestvideo[vcodec^=avc]+140/bestvideo+140");
+            args.push(
+              "-f",
+              `bestvideo[vcodec^=avc]+${aacAudio}/bestvideo+${aacAudio}`,
+            );
           }
 
           // ビデオコーデックの優先順位を指定
-          args.push("-S", "res,vcodec:h264");
+          args.push("-S", "res,vcodec:h264,acodec:m4a");
         }
       }
 
