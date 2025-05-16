@@ -4,9 +4,12 @@ import { join, resolve } from "node:path";
 import * as ytdlWrapper from "@j3lte/ytdl-wrapper";
 import { sendProgressToClients } from "./sse-service";
 import type { ProgressData } from "./sse-service";
+import { ytdlpBinaryService } from "./ytdlp-binary-service";
 
-// yt-dlpの実行ファイルのパス
-const YT_DLP_PATH = resolve("./bin/yt-dlp.exe");
+// yt-dlpの実行ファイルのパス（動的取得）
+function getYtDlpPath() {
+  return ytdlpBinaryService.getYtDlpPath();
+}
 
 // ダウンロード先のディレクトリ
 const DOWNLOADS_DIR = resolve("./downloads");
@@ -17,7 +20,10 @@ if (!existsSync(DOWNLOADS_DIR)) {
 }
 
 // ytdl-wrapperインスタンスの作成
-const ytdlInstance = new ytdlWrapper.YTDLWrapper(YT_DLP_PATH);
+function createYtdlInstance() {
+  return new ytdlWrapper.YTDLWrapper(getYtDlpPath());
+}
+let ytdlInstance = createYtdlInstance();
 
 // アクティブなダウンロードを追跡するMap
 const activeDownloads = new Map<string, ytdlWrapper.YTDLEventEmitter>();
@@ -39,18 +45,18 @@ class YtdlService {
    */
   async checkStatus() {
     try {
-      const version = execSync(`"${YT_DLP_PATH}" --version`, {
+      const version = execSync(`"${getYtDlpPath()}" --version`, {
         encoding: "utf8",
       }).trim();
       return {
-        executable: YT_DLP_PATH,
+        executable: getYtDlpPath(),
         version,
         working: true,
       };
     } catch (error) {
       console.error("yt-dlpの状態確認中にエラーが発生しました:", error);
       return {
-        executable: YT_DLP_PATH,
+        executable: getYtDlpPath(),
         working: false,
         error: String(error),
       };
@@ -63,6 +69,8 @@ class YtdlService {
   async getVideoInfo(url: string) {
     try {
       // getMediaInfoメソッドを使用
+      // yt-dlpバイナリが更新された場合に備えてインスタンスを再生成
+      ytdlInstance = createYtdlInstance();
       const mediaInfo = await ytdlInstance.getMediaInfo(url);
       return mediaInfo;
     } catch (error) {
@@ -76,6 +84,8 @@ class YtdlService {
    */
   async getAvailableFormats(url: string) {
     try {
+      // yt-dlpバイナリが更新された場合に備えてインスタンスを再生成
+      ytdlInstance = createYtdlInstance();
       // execメソッドを使用してformat一覧を取得
       const result = ytdlInstance.exec([
         url,
@@ -124,6 +134,8 @@ class YtdlService {
     } = options;
 
     try {
+      // yt-dlpバイナリが更新された場合に備えてインスタンスを再生成
+      ytdlInstance = createYtdlInstance();
       const args = [url];
 
       // 出力ファイル

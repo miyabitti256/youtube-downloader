@@ -12,14 +12,28 @@ yt-dlpを使用したシンプルなYouTubeダウンロードWebアプリケー�
 
 ## 動作要件
 
-- [Bun](https://bun.sh/) 1.0以上
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) (PATHに追加してください)
+- Windows環境
+- インターネット接続
 
-## インストール
+※ 必要な実行環境（Bunとyt-dlp）は初回起動時に自動でダウンロードされます
+
+## 簡単な使い方
+
+1. `start_ytdl_server.bat` をダブルクリックするだけ！
+
+初回起動時に以下の処理が自動的に行われます:
+- bunの実行ファイルがダウンロードされbinフォルダに配置
+- 依存パッケージのインストール
+- yt-dlpの最新バージョンの確認・ダウンロード
+- アプリケーションの起動とブラウザ自動オープン
+
+## 開発者向けセットアップ
+
+開発やカスタマイズを行いたい場合は以下の手順で設定できます。
 
 1. リポジトリをクローン:
    ```
-   git clone https://github.com/yourusername/youtube-downloader.git
+   git clone https://github.com/miyabitti256/youtube-downloader.git
    cd youtube-downloader
    ```
 
@@ -28,27 +42,18 @@ yt-dlpを使用したシンプルなYouTubeダウンロードWebアプリケー�
    bun install
    ```
 
-3. yt-dlpがインストールされていることを確認:
+3. 開発モードで実行:
    ```
-   yt-dlp --version
+   bun dev
    ```
-
-## 使い方
-
-### 開発モード
-
-```
-bun dev
-```
-
-### 本番モード
-
-```
-bun start
-```
+   
+4. 本番モードで実行:
+   ```
+   bun start
+   ```
 
 アプリケーションが起動すると、自動的にブラウザが開きます。
-（デフォルトのポートは3000です。環境変数`PORT`で変更できます）
+（デフォルトのポートは4649です。環境変数`PORT`で変更できます）
 
 ## 使用技術
 
@@ -56,7 +61,3 @@ bun start
 - [Hono](https://hono.dev/) - 軽量なWebフレームワーク
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) - 動画ダウンロードライブラリ
 - [@j3lte/ytdl-wrapper](https://jsr.io/@j3lte/ytdl-wrapper) - yt-dlpのJavaScriptラッパー
-
-## ライセンス
-
-MIT

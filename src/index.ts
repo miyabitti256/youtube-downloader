@@ -4,7 +4,12 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { prettyJSON } from "hono/pretty-json";
 
+import { exec } from "node:child_process";
 import { ytRoutes } from "./routes/yt-routes";
+import { ytdlpBinaryService } from "./services/ytdlp-binary-service";
+
+// yt-dlpバイナリの初期化・更新
+await ytdlpBinaryService.setup();
 
 const app = new Hono();
 
@@ -21,7 +26,21 @@ app.use("/static", serveStatic({ root: "./static" }));
 app.route("/api", ytRoutes);
 
 // デフォルトポート
-const PORT = Number.parseInt(process.env.PORT || "3000");
+const PORT = Number.parseInt(process.env.PORT || "4649");
+
+// サーバー起動時にブラウザを自動で開く
+function openBrowser(url: string) {
+  const platform = process.platform;
+  if (platform === "win32") {
+    exec(`start ${url}`);
+  } else if (platform === "darwin") {
+    exec(`open ${url}`);
+  } else {
+    exec(`xdg-open ${url}`);
+  }
+}
+
+openBrowser(`http://localhost:${PORT}`);
 
 console.log(`サーバーが起動しました。http://localhost:${PORT}`);
 
